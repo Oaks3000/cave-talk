@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="64%" r="62%">
+      <stop offset="0" stop-color="#4A3320"/>
+      <stop offset="0.55" stop-color="#241B13"/>
+      <stop offset="1" stop-color="#14100C"/>
+    </radialGradient>
+    <clipPath id="flame">
+      <path d="M256 104C266 170 350 196 350 292C350 352 308 398 256 398C204 398 162 352 162 292C162 246 188 214 212 188C212 224 230 244 246 246C234 192 240 148 256 104Z"/>
+    </clipPath>
+  </defs>
+  <rect width="512" height="512" fill="url(#glow)"/>
+  <g clip-path="url(#flame)">
+    <rect x="140" y="90" width="230" height="320" fill="#E8A33D"/>
+    <path d="M256 190C264 236 316 252 316 308C316 348 290 380 256 380C222 380 196 348 196 308C196 270 222 252 232 226C240 246 250 252 256 252C250 232 250 210 256 190Z" fill="#F4C26B"/>
+    <path d="M256 280C262 304 288 314 288 340C288 362 274 376 256 376C238 376 224 362 224 340C224 322 244 312 256 280Z" fill="#F1E9D8"/>
+    <!-- stencil bridge cuts, echoing the headline typeface -->
+    <rect x="140" y="288" width="230" height="13" fill="#1B1712"/>
+  </g>
+</svg>

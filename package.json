@@ -1,0 +1,20 @@
+{
+  "name": "cave-talk",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cave Talk - one-syllable word game for 2-3 teams, installable offline phone app",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "serve": "python3 -m http.server 8080"
+  },
+  "devDependencies": {
+    "@babel/core": "8.0.10",
+    "@babel/preset-react": "8.0.1",
+    "@fontsource/big-shoulders-stencil": "5.3.0",
+    "@fontsource/space-grotesk": "5.3.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "tailwindcss": "3.4.19"
+  }
+}
