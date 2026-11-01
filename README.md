@@ -55,4 +55,6 @@ Commit the generated files along with the source: Pages serves them as-is.
 
 ### Enabling GitHub Pages
 
-Settings -> Pages -> **Build and deployment** -> Source: *Deploy from a branch* -> Branch: `main`, folder `/ (root)`.
+Settings -> Pages -> **Build and deployment** -> Source: **GitHub Actions**.
+`.github/workflows/pages.yml` then publishes the app on every push to `main`
+(or run it by hand from the Actions tab: *Deploy to GitHub Pages* -> *Run workflow*).
