@@ -1,6 +1,6 @@
 // Builds the installable web app into the repo root (what GitHub Pages serves).
 //
-//   src/words.js + src/icons.jsx + src/app.jsx  ->  app.js        (Babel, classic JSX runtime)
+//   src/words.js, icons.jsx, store.js, sheets.jsx, app.jsx ->  app.js        (Babel, classic JSX runtime)
 //   src/input.css                               ->  styles.css    (Tailwind)
 //   src/index.template.html                     ->  index.html
 //   src/sw.template.js                          ->  sw.js         (versioned by a hash of every cached file)
@@ -23,7 +23,7 @@ const at = (...p) => path.join(ROOT, ...p);
 const read = (...p) => readFileSync(at(...p), "utf8");
 
 // 1. Game code: concatenate sources, compile JSX to plain JS, wrap in an IIFE.
-const source = ["src/words.js", "src/icons.jsx", "src/app.jsx"].map((f) => read(f)).join("\n\n");
+const source = ["src/words.js", "src/icons.jsx", "src/store.js", "src/sheets.jsx", "src/app.jsx"].map((f) => read(f)).join("\n\n");
 const compiled = babel.transformSync(source, {
   presets: [[require.resolve("@babel/preset-react"), { runtime: "classic" }]],
   filename: "app.jsx",

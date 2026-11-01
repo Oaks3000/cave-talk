@@ -4,8 +4,6 @@ const TEAM_COLORS = ["#6E9B7A", "#C1502E", "#4E7FA8"];
 const TEAM_COLORS_DIM = ["#3E5A47", "#6B2D19", "#2C465A"];
 const ROUND_SECONDS = 60;
 const FREE_SKIPS = 3;
-const STORAGE_TEAM_KEY = "cavetalk:stats:teams";
-const STORAGE_PLAYER_KEY = "cavetalk:stats:players";
 
 function shuffle(arr) {
   const a = [...arr];
@@ -16,11 +14,16 @@ function shuffle(arr) {
   return a;
 }
 
+const blankSlots = () => DEFAULT_TEAM_NAMES.map(() => ({ name: "", playerIds: [] }));
+
 function CaveTalk() {
   const [phase, setPhase] = useState("setup");
   const [teamCount, setTeamCount] = useState(2);
-  const [teamNames, setTeamNames] = useState(["Team A", "Team B", "Team C"]);
-  const [teamPlayers, setTeamPlayers] = useState(["", "", ""]);
+  const [store, setStore] = useState(loadStore); // roster, saved teams, win counts
+  const [slots, setSlots] = useState(blankSlots); // setup-screen team lines (name text + player ids)
+  const [teamNames, setTeamNames] = useState(DEFAULT_TEAM_NAMES); // names locked in for the running game
+  const [setupError, setSetupError] = useState("");
+  const [sheet, setSheet] = useState(null); // null | "rules" | "leaderboard" | "manage" | {type, slot}
   const [targetScore, setTargetScore] = useState(15);
   const [scores, setScores] = useState([0, 0, 0]);
   const [currentTeam, setCurrentTeam] = useState(0);
@@ -31,95 +34,81 @@ function CaveTalk() {
   const [skipsUsed, setSkipsUsed] = useState(0);
   const [roundEndReason, setRoundEndReason] = useState(null);
   const [shake, setShake] = useState(false);
-  const [showRules, setShowRules] = useState(false);
-  const [showLeaderboard, setShowLeaderboard] = useState(false);
-  const [confirmReset, setConfirmReset] = useState(false);
-  const [teamStats, setTeamStats] = useState({});
-  const [playerStats, setPlayerStats] = useState({});
-  const [statsLoaded, setStatsLoaded] = useState(false);
   const intervalRef = useRef(null);
+  const scoresRef = useRef([0, 0, 0]); // always-current scores, so ending a round never reads stale state
+  const gameRef = useRef(null); // { teamIds, memberIds } of the running game, for recording the result
+  const roundLiveRef = useRef(false); // true while a round is running; stops bonk + timer ending it twice
 
+  // Save the roster / teams / wins whenever they change.
   useEffect(() => {
     try {
-      const t = localStorage.getItem(STORAGE_TEAM_KEY);
-      if (t) setTeamStats(JSON.parse(t));
+      localStorage.setItem(STORE_KEY, JSON.stringify(store));
     } catch (e) {
-      // no team stats saved yet
+      // storage unavailable (private browsing, etc.) -- the game still works
     }
-    try {
-      const p = localStorage.getItem(STORAGE_PLAYER_KEY);
-      if (p) setPlayerStats(JSON.parse(p));
-    } catch (e) {
-      // no player stats saved yet
-    }
-    setStatsLoaded(true);
-  }, []);
+  }, [store]);
 
-  const saveStats = (key, obj) => {
-    try {
-      localStorage.setItem(key, JSON.stringify(obj));
-    } catch (e) {
-      // storage unavailable (private browsing, etc.) -- fail silently
+  const playerById = {};
+  store.players.forEach((p) => (playerById[p.id] = p));
+
+  // ---- setup helpers ----
+  const slotName = (i) => cleanName(slots[i].name) || DEFAULT_TEAM_NAMES[i];
+  const updateSlot = (i, patch) => {
+    setSlots((prev) => prev.map((s, j) => (j === i ? { ...s, ...patch } : s)));
+    setSetupError("");
+  };
+  // which other (active) team each player is already on: { playerId: teamName }
+  const takenByFor = (i) => {
+    const m = {};
+    for (let j = 0; j < teamCount; j++) {
+      if (j !== i) slots[j].playerIds.forEach((id) => (m[id] = slotName(j)));
+    }
+    return m;
+  };
+  const togglePlayer = (i, id) => {
+    const cur = slots[i].playerIds;
+    updateSlot(i, { playerIds: cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id] });
+  };
+  const createPlayer = (i, rawName) => {
+    const r = addPlayer(store, rawName);
+    const blocked = takenByFor(i)[r.player.id];
+    if (!blocked) {
+      if (!r.existed) setStore(r.store);
+      if (!slots[i].playerIds.includes(r.player.id)) {
+        updateSlot(i, { playerIds: [...slots[i].playerIds, r.player.id] });
+      }
+    }
+    return { player: r.player, existed: r.existed, blocked };
+  };
+  // why a saved team can't be loaded into slot i right now (or "")
+  const loadBlockReason = (i, t) => {
+    for (let j = 0; j < teamCount; j++) {
+      if (j !== i && nameKey(slotName(j)) === nameKey(t.name)) return "Already in this game";
+    }
+    const taken = takenByFor(i);
+    const clash = t.playerIds.find((id) => taken[id]);
+    if (clash) return `${playerById[clash].name} is on ${taken[clash]}`;
+    return "";
+  };
+  const loadTeam = (i, t) => {
+    updateSlot(i, { name: t.name, playerIds: t.playerIds.filter((id) => playerById[id]) });
+    setSheet(null);
+  };
+  // Typing the name of a saved team into an empty slot loads its players.
+  const autoLoadOnBlur = (i) => {
+    if (slots[i].playerIds.length) return;
+    const t = store.teams.find((x) => nameKey(x.name) === nameKey(slots[i].name));
+    if (t && t.playerIds.length && !loadBlockReason(i, t)) {
+      updateSlot(i, { name: t.name, playerIds: t.playerIds.filter((id) => playerById[id]) });
     }
   };
-
-  const parsePlayers = (str) =>
-    (str || "").split(",").map((s) => s.trim()).filter(Boolean);
-
-  const recordMatchStart = () => {
-    const activeTeamNames = teamNames.slice(0, teamCount);
-    const allPlayers = teamPlayers.slice(0, teamCount).flatMap(parsePlayers);
-    setTeamStats((prev) => {
-      const next = { ...prev };
-      activeTeamNames.forEach((name) => {
-        const cur = next[name] || { wins: 0, played: 0 };
-        next[name] = { ...cur, played: cur.played + 1 };
-      });
-      saveStats(STORAGE_TEAM_KEY, next);
-      return next;
+  // Deleting a player in Manage must not leave a dangling id on the setup screen.
+  useEffect(() => {
+    setSlots((prev) => {
+      if (prev.every((s) => s.playerIds.every((id) => playerById[id]))) return prev;
+      return prev.map((s) => ({ ...s, playerIds: s.playerIds.filter((id) => playerById[id]) }));
     });
-    if (allPlayers.length) {
-      setPlayerStats((prev) => {
-        const next = { ...prev };
-        allPlayers.forEach((name) => {
-          const cur = next[name] || { wins: 0, played: 0 };
-          next[name] = { ...cur, played: cur.played + 1 };
-        });
-        saveStats(STORAGE_PLAYER_KEY, next);
-        return next;
-      });
-    }
-  };
-
-  const recordWin = (winnerIdx) => {
-    const winnerName = teamNames[winnerIdx];
-    setTeamStats((prev) => {
-      const next = { ...prev };
-      const cur = next[winnerName] || { wins: 0, played: 0 };
-      next[winnerName] = { ...cur, wins: cur.wins + 1 };
-      saveStats(STORAGE_TEAM_KEY, next);
-      return next;
-    });
-    const winners = parsePlayers(teamPlayers[winnerIdx]);
-    if (winners.length) {
-      setPlayerStats((prev) => {
-        const next = { ...prev };
-        winners.forEach((name) => {
-          const cur = next[name] || { wins: 0, played: 0 };
-          next[name] = { ...cur, wins: cur.wins + 1 };
-        });
-        saveStats(STORAGE_PLAYER_KEY, next);
-        return next;
-      });
-    }
-  };
-
-  const resetStats = () => {
-    setTeamStats({});
-    setPlayerStats({});
-    saveStats(STORAGE_TEAM_KEY, {});
-    saveStats(STORAGE_PLAYER_KEY, {});
-  };
+  }, [store.players]);
 
   const drawFrom = useCallback((currentDeck) => {
     if (currentDeck.length === 0) {
@@ -136,34 +125,41 @@ function CaveTalk() {
     }
   };
 
-  const endRound = useCallback((reason) => {
-    clearTimer();
-    setRoundEndReason(reason);
-    setScores((prev) => {
-      const next = [...prev];
-      if (next[currentTeam] >= targetScore) {
+  const changeScore = (team, delta) => {
+    const next = [...scoresRef.current];
+    next[team] = Math.max(0, next[team] + delta);
+    scoresRef.current = next;
+    setScores(next);
+  };
+
+  // Ends the running round. Safe to call more than once (bonk and the timer can race).
+  // The game result is recorded exactly once, here, when a team has reached the target.
+  const endRound = useCallback(
+    (reason) => {
+      if (!roundLiveRef.current) return;
+      roundLiveRef.current = false;
+      clearTimer();
+      setRoundEndReason(reason);
+      if (scoresRef.current[currentTeam] >= targetScore) {
+        const game = gameRef.current;
+        setStore((s) => recordGame(s, game, currentTeam));
         setPhase("gameOver");
-        recordWin(currentTeam);
       } else {
         setPhase("roundEnd");
       }
-      return next;
-    });
-  }, [currentTeam, targetScore, teamNames, teamPlayers, teamCount]);
+    },
+    [currentTeam, targetScore]
+  );
 
   useEffect(() => {
     if (phase !== "playing") return;
-    intervalRef.current = setInterval(() => {
-      setTimeLeft((t) => {
-        if (t <= 1) {
-          endRound("time");
-          return 0;
-        }
-        return t - 1;
-      });
-    }, 1000);
+    intervalRef.current = setInterval(() => setTimeLeft((t) => (t > 0 ? t - 1 : 0)), 1000);
     return clearTimer;
-  }, [phase, endRound]);
+  }, [phase]);
+
+  useEffect(() => {
+    if (phase === "playing" && timeLeft <= 0) endRound("time");
+  }, [phase, timeLeft, endRound]);
 
   // Phone-app behaviour: keep the screen awake while a round is running, so the
   // display doesn't dim mid-clue. Re-acquired if the app returns to the foreground.
@@ -193,17 +189,50 @@ function CaveTalk() {
   }, [phase]);
 
   // Lets the service-worker updater (index.html) know when it's safe to reload
-  // into a freshly-installed version: only from the setup screen, never mid-game.
+  // into a freshly-installed version: only from the bare setup screen, never mid-game
+  // and never while a sheet is open.
   useEffect(() => {
-    document.documentElement.dataset.phase = phase;
-  }, [phase]);
+    document.documentElement.dataset.phase = sheet ? "sheet" : phase;
+  }, [phase, sheet]);
 
-  const startGame = () => {
-    setScores(Array(teamCount).fill(0));
+  const beginGame = () => {
+    scoresRef.current = [0, 0, 0];
+    setScores([0, 0, 0]);
     setCurrentTeam(0);
     setDeck(shuffle(WORDS));
-    recordMatchStart();
     setPhase("ready");
+  };
+
+  // Locks in the teams (saving each as a reusable team) and starts the game.
+  const startGame = () => {
+    const active = slots.slice(0, teamCount);
+    const names = active.map((_, i) => slotName(i));
+    if (new Set(names.map(nameKey)).size !== names.length) {
+      setSetupError("Each team needs its own name.");
+      return;
+    }
+    const allIds = active.flatMap((s) => s.playerIds);
+    if (new Set(allIds).size !== allIds.length) {
+      setSetupError("A player can only be on one team.");
+      return;
+    }
+    let s = store;
+    const teamIds = [];
+    const memberIds = [];
+    const finalNames = [];
+    active.forEach((slot, i) => {
+      const ids = slot.playerIds.filter((id) => s.players.some((p) => p.id === id));
+      const r = commitTeam(s, names[i], ids);
+      s = r.store;
+      teamIds.push(r.team.id);
+      memberIds.push(ids);
+      finalNames.push(r.team.name);
+    });
+    setStore(s);
+    gameRef.current = { teamIds, memberIds };
+    setTeamNames(finalNames);
+    setSetupError("");
+    beginGame();
   };
 
   const startRound = () => {
@@ -213,15 +242,12 @@ function CaveTalk() {
     setTimeLeft(ROUND_SECONDS);
     setRoundScore(0);
     setSkipsUsed(0);
+    roundLiveRef.current = true;
     setPhase("playing");
   };
 
   const handleCorrect = () => {
-    setScores((prev) => {
-      const next = [...prev];
-      next[currentTeam] += currentCard.pts;
-      return next;
-    });
+    changeScore(currentTeam, currentCard.pts);
     setRoundScore((r) => r + currentCard.pts);
     const { card, rest } = drawFrom(deck);
     setDeck(rest);
@@ -231,13 +257,8 @@ function CaveTalk() {
   const handleSkip = () => {
     const nextSkipCount = skipsUsed + 1;
     setSkipsUsed(nextSkipCount);
-    const penalized = nextSkipCount > FREE_SKIPS;
-    if (penalized) {
-      setScores((prev) => {
-        const next = [...prev];
-        next[currentTeam] = Math.max(0, next[currentTeam] - 1);
-        return next;
-      });
+    if (nextSkipCount > FREE_SKIPS) {
+      changeScore(currentTeam, -1);
       setRoundScore((r) => r - 1);
     }
     const { card, rest } = drawFrom(deck);
@@ -256,16 +277,10 @@ function CaveTalk() {
     setPhase("ready");
   };
 
-  const playAgain = () => {
-    setScores(Array(teamCount).fill(0));
-    setCurrentTeam(0);
-    setDeck(shuffle(WORDS));
-    recordMatchStart();
-    setPhase("ready");
-  };
+  const playAgain = () => beginGame(); // same teams, fresh game
+  const changeTeams = () => setPhase("setup");
 
-  const winner = scores.slice(0, teamCount).findIndex((s) => s >= targetScore);
-  const hasWinner = winner !== -1;
+  const winner = currentTeam; // a game only ends on the turn of the team that reached the target
 
   return (
     <div
@@ -306,8 +321,18 @@ function CaveTalk() {
             <h1 className="font-display text-3xl chisel" style={{ color: "#F1E9D8" }}>CAVE TALK</h1>
           </div>
           <div className="flex items-center gap-2">
+            {phase === "setup" && (
+              <button
+                onClick={() => setSheet("manage")}
+                className="rounded-full p-2 border"
+                style={{ borderColor: "#4A4038" }}
+                aria-label="Players and teams"
+              >
+                <Users size={20} color="#C9BBA3" />
+              </button>
+            )}
             <button
-              onClick={() => setShowLeaderboard(true)}
+              onClick={() => setSheet("leaderboard")}
               className="rounded-full p-2 border"
               style={{ borderColor: "#4A4038" }}
               aria-label="Leaderboard"
@@ -315,7 +340,7 @@ function CaveTalk() {
               <Trophy size={20} color="#C9BBA3" />
             </button>
             <button
-              onClick={() => setShowRules(true)}
+              onClick={() => setSheet("rules")}
               className="rounded-full p-2 border"
               style={{ borderColor: "#4A4038" }}
               aria-label="Show rules"
@@ -352,34 +377,53 @@ function CaveTalk() {
             </div>
 
             {Array.from({ length: teamCount }, (_, i) => i).map((i) => {
-              const defaultName = ["Team A", "Team B", "Team C"][i];
+              const defaultName = DEFAULT_TEAM_NAMES[i];
+              const members = slots[i].playerIds.map((id) => playerById[id]).filter(Boolean);
+              const savedTeams = store.teams.filter((t) => !isPlaceholderTeam(t));
+              const smallBtn = "rounded-full px-3 py-1 text-sm";
               return (
                 <div key={i}>
                   <label className="text-xs uppercase tracking-wide" style={{ color: TEAM_COLORS[i] }}>
                     Team {i + 1}
                   </label>
                   <input
-                    value={teamNames[i]}
-                    onChange={(e) => {
-                      const next = [...teamNames];
-                      next[i] = e.target.value || defaultName;
-                      setTeamNames(next);
-                    }}
+                    value={slots[i].name}
+                    onChange={(e) => updateSlot(i, { name: e.target.value })}
+                    onBlur={() => autoLoadOnBlur(i)}
+                    maxLength={20}
                     className="mt-1 w-full rounded-xl px-4 py-3 text-lg font-body outline-none"
                     style={{ background: "#241E18", border: `2px solid ${TEAM_COLORS[i]}`, color: "#F1E9D8" }}
                     placeholder={defaultName}
                   />
-                  <input
-                    value={teamPlayers[i]}
-                    onChange={(e) => {
-                      const next = [...teamPlayers];
-                      next[i] = e.target.value;
-                      setTeamPlayers(next);
-                    }}
-                    className="mt-2 w-full rounded-xl px-4 py-2 text-base font-body outline-none"
-                    style={{ background: "#1D1712", border: "1px solid #3A322A", color: "#C9BBA3" }}
-                    placeholder="Players (optional, comma separated)"
-                  />
+                  <div className="flex flex-wrap items-center gap-2 mt-2">
+                    {members.map((p) => (
+                      <button
+                        key={p.id}
+                        onClick={() => togglePlayer(i, p.id)}
+                        aria-label={`Remove ${p.name}`}
+                        className="rounded-full pl-3 pr-2 py-1 text-sm flex items-center gap-1"
+                        style={{ background: TEAM_COLORS[i], color: "#100D0A" }}
+                      >
+                        {p.name} <X size={12} color="#100D0A" />
+                      </button>
+                    ))}
+                    <button
+                      onClick={() => setSheet({ type: "players", slot: i })}
+                      className={smallBtn}
+                      style={{ border: `1px dashed ${TEAM_COLORS[i]}`, color: TEAM_COLORS[i] }}
+                    >
+                      + Players
+                    </button>
+                    {savedTeams.length > 0 && (
+                      <button
+                        onClick={() => setSheet({ type: "teams", slot: i })}
+                        className={smallBtn}
+                        style={{ border: "1px solid #4A4038", color: "#C9BBA3" }}
+                      >
+                        Saved teams
+                      </button>
+                    )}
+                  </div>
                 </div>
               );
             })}
@@ -404,9 +448,12 @@ function CaveTalk() {
               </div>
             </div>
 
+            {setupError && (
+              <p className="text-sm text-center -mb-2" style={{ color: "#E8917A" }}>{setupError}</p>
+            )}
             <button
               onClick={startGame}
-              className="mt-4 rounded-xl py-4 font-display text-2xl flex items-center justify-center gap-2 chisel"
+              className="mt-2 rounded-xl py-4 font-display text-2xl flex items-center justify-center gap-2 chisel"
               style={{ background: "#E8A33D", color: "#1B1712" }}
             >
               <Play size={22} /> START GAME
@@ -529,7 +576,7 @@ function CaveTalk() {
         )}
 
         {/* GAME OVER */}
-        {phase === "gameOver" && hasWinner && (
+        {phase === "gameOver" && (
           <div className="flex-1 flex flex-col items-center justify-center gap-5 font-body text-center">
             <Trophy size={48} color={TEAM_COLORS[winner]} />
             <p className="font-display text-4xl chisel uppercase" style={{ color: TEAM_COLORS[winner] }}>
@@ -549,133 +596,44 @@ function CaveTalk() {
             >
               <RotateCcw size={20} /> PLAY AGAIN
             </button>
+            <button
+              onClick={changeTeams}
+              className="rounded-xl px-6 py-3 font-body text-sm"
+              style={{ border: "2px solid #4A4038", color: "#C9BBA3" }}
+            >
+              Change teams
+            </button>
           </div>
         )}
       </div>
 
-      {/* RULES OVERLAY */}
-      {showRules && (
-        <div
-          className="fixed inset-0 z-50 flex items-end"
-          style={{ background: "rgba(0,0,0,0.7)" }}
-          onClick={() => setShowRules(false)}
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-md mx-auto rounded-t-2xl p-6 safe-bottom font-body max-h-[80vh] overflow-y-auto"
-            style={{ background: "#211B16", border: "1px solid #4A4038" }}
-          >
-            <div className="flex items-center justify-between mb-4">
-              <p className="font-display text-2xl chisel" style={{ color: "#F1E9D8" }}>HOW TO PLAY</p>
-              <button onClick={() => setShowRules(false)}><X size={22} color="#C9BBA3" /></button>
-            </div>
-            <ul className="text-sm space-y-3" style={{ color: "#C9BBA3" }}>
-              <li>• One player (the Wordsmith) sees a word and must get their team to guess it in 60 seconds.</li>
-              <li>• Clues can only use <b>one-syllable words</b>. "A," "the," "of" are fine.</li>
-              <li>• No rhyming, no spelling, no sounds-like clues.</li>
-              <li>• The <b>other team</b> listens closely — the moment a multi-syllable word slips out, they tap <b>Bonk!</b> The card is lost and the turn ends immediately.</li>
-              <li>• Tap <b>Skip</b> to pass a hard card to the back of the deck. You get 3 free skips per turn — after that, every skip costs your team 1 point.</li>
-              <li>• Tap <b>Correct</b> the instant your team guesses right — points add up live.</li>
-              <li>• First team to the target score wins.</li>
-            </ul>
-          </div>
-        </div>
+      {sheet === "rules" && <RulesSheet onClose={() => setSheet(null)} />}
+      {sheet === "leaderboard" && (
+        <LeaderboardSheet store={store} onReset={() => setStore(resetStats(store))} onClose={() => setSheet(null)} />
       )}
-
-      {/* LEADERBOARD OVERLAY */}
-      {showLeaderboard && (
-        <div
-          className="fixed inset-0 z-50 flex items-end"
-          style={{ background: "rgba(0,0,0,0.7)" }}
-          onClick={() => {
-            setShowLeaderboard(false);
-            setConfirmReset(false);
-          }}
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-md mx-auto rounded-t-2xl p-6 safe-bottom font-body max-h-[80vh] overflow-y-auto"
-            style={{ background: "#211B16", border: "1px solid #4A4038" }}
-          >
-            <div className="flex items-center justify-between mb-4">
-              <p className="font-display text-2xl chisel" style={{ color: "#F1E9D8" }}>LEADERBOARD</p>
-              <button
-                onClick={() => {
-                  setShowLeaderboard(false);
-                  setConfirmReset(false);
-                }}
-              >
-                <X size={22} color="#C9BBA3" />
-              </button>
-            </div>
-
-            <p className="text-xs uppercase tracking-wide mb-2" style={{ color: "#9A8C77" }}>Teams</p>
-            <div className="space-y-2 mb-5">
-              {Object.entries(teamStats)
-                .sort((a, b) => b[1].wins - a[1].wins)
-                .map(([name, s]) => (
-                  <div
-                    key={name}
-                    className="flex items-center justify-between rounded-lg px-3 py-2"
-                    style={{ background: "#241E18" }}
-                  >
-                    <span style={{ color: "#F1E9D8" }}>{name}</span>
-                    <span className="text-sm" style={{ color: "#E8A33D" }}>
-                      {s.wins}W · {s.played}P
-                    </span>
-                  </div>
-                ))}
-              {Object.keys(teamStats).length === 0 && (
-                <p className="text-sm" style={{ color: "#6B5F50" }}>No games recorded yet.</p>
-              )}
-            </div>
-
-            <p className="text-xs uppercase tracking-wide mb-2" style={{ color: "#9A8C77" }}>Players</p>
-            <div className="space-y-2 mb-5">
-              {Object.entries(playerStats)
-                .sort((a, b) => b[1].wins - a[1].wins)
-                .map(([name, s]) => (
-                  <div
-                    key={name}
-                    className="flex items-center justify-between rounded-lg px-3 py-2"
-                    style={{ background: "#241E18" }}
-                  >
-                    <span style={{ color: "#F1E9D8" }}>{name}</span>
-                    <span className="text-sm" style={{ color: "#E8A33D" }}>
-                      {s.wins}W · {s.played}P
-                    </span>
-                  </div>
-                ))}
-              {Object.keys(playerStats).length === 0 && (
-                <p className="text-sm" style={{ color: "#6B5F50" }}>
-                  Add player names at setup (comma separated) to track individuals.
-                </p>
-              )}
-            </div>
-
-            <button
-              onClick={() => {
-                if (confirmReset) {
-                  resetStats();
-                  setConfirmReset(false);
-                } else {
-                  setConfirmReset(true);
-                }
-              }}
-              className="w-full rounded-xl py-3 flex items-center justify-center gap-2 text-sm"
-              style={{
-                background: confirmReset ? "#C1502E" : "#241E18",
-                color: confirmReset ? "#2A0F08" : "#C9BBA3",
-                border: "2px solid #4A4038",
-              }}
-            >
-              <Trash2 size={16} /> {confirmReset ? "Tap again to confirm reset" : "Reset stats"}
-            </button>
-            <p className="text-xs text-center mt-3" style={{ color: "#6B5F50" }}>
-              Stats are saved on this device and persist across games.
-            </p>
-          </div>
-        </div>
+      {sheet === "manage" && (
+        <ManageSheet store={store} setStore={setStore} onClose={() => setSheet(null)} />
+      )}
+      {sheet && sheet.type === "players" && (
+        <PlayerPickerSheet
+          teamName={slotName(sheet.slot)}
+          color={TEAM_COLORS[sheet.slot]}
+          players={store.players}
+          selectedIds={slots[sheet.slot].playerIds}
+          takenBy={takenByFor(sheet.slot)}
+          onToggle={(id) => togglePlayer(sheet.slot, id)}
+          onCreate={(name) => createPlayer(sheet.slot, name)}
+          onClose={() => setSheet(null)}
+        />
+      )}
+      {sheet && sheet.type === "teams" && (
+        <SavedTeamsSheet
+          teams={store.teams.filter((t) => !isPlaceholderTeam(t))}
+          playerById={playerById}
+          blockedReason={(t) => loadBlockReason(sheet.slot, t)}
+          onLoad={(t) => loadTeam(sheet.slot, t)}
+          onClose={() => setSheet(null)}
+        />
       )}
     </div>
   );

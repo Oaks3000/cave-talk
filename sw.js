@@ -3,7 +3,7 @@
 //
 // NOTE: other games hosted on the same github.io origin keep their own caches, so
 // we only ever create/delete caches prefixed "cave-talk-".
-const CACHE = "cave-talk-9df4922b2c";
+const CACHE = "cave-talk-3f275d2a27";
 const ASSETS = [
   "./",
   "index.html",

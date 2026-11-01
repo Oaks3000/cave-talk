@@ -299,6 +299,718 @@ function Trash2({
     y2: "17"
   }));
 }
+const STORE_KEY = "cavetalk:v2";
+const OLD_TEAM_KEY = "cavetalk:stats:teams";
+const OLD_PLAYER_KEY = "cavetalk:stats:players";
+const DEFAULT_TEAM_NAMES = ["Team A", "Team B", "Team C"];
+const cleanName = s => (s || "").replace(/\s+/g, " ").trim();
+const nameKey = s => cleanName(s).toLowerCase();
+let idSeq = 0;
+const newId = () => Date.now().toString(36) + (idSeq++).toString(36) + Math.random().toString(36).slice(2, 6);
+const emptyStore = () => ({
+  v: 2,
+  players: [],
+  teams: [],
+  stats: {
+    players: {},
+    teams: {}
+  }
+});
+function loadStore() {
+  try {
+    const raw = localStorage.getItem(STORE_KEY);
+    if (raw) {
+      const s = JSON.parse(raw);
+      if (s && s.v === 2 && Array.isArray(s.players) && Array.isArray(s.teams) && s.stats) return s;
+    }
+  } catch (e) {}
+  return migrateV1();
+}
+function migrateV1() {
+  const store = emptyStore();
+  const readOld = key => {
+    try {
+      return JSON.parse(localStorage.getItem(key)) || {};
+    } catch (e) {
+      return {};
+    }
+  };
+  const fold = (oldStats, list, statsKey, makeItem) => {
+    Object.keys(oldStats).forEach(rawName => {
+      const name = cleanName(rawName);
+      if (!name) return;
+      let item = list.find(x => nameKey(x.name) === nameKey(name));
+      if (!item) {
+        item = makeItem(name);
+        list.push(item);
+      }
+      const st = oldStats[rawName] || {};
+      store.stats[statsKey] = bumpStats(store.stats[statsKey], item.id, st.wins | 0, st.played | 0);
+    });
+  };
+  fold(readOld(OLD_PLAYER_KEY), store.players, "players", name => ({
+    id: newId(),
+    name
+  }));
+  fold(readOld(OLD_TEAM_KEY), store.teams, "teams", name => ({
+    id: newId(),
+    name,
+    playerIds: []
+  }));
+  return store;
+}
+function bumpStats(map, id, wins, played) {
+  const cur = map[id] || {
+    wins: 0,
+    played: 0
+  };
+  return {
+    ...map,
+    [id]: {
+      wins: cur.wins + wins,
+      played: cur.played + played
+    }
+  };
+}
+function addPlayer(store, rawName) {
+  const name = cleanName(rawName);
+  const existing = store.players.find(p => nameKey(p.name) === nameKey(name));
+  if (existing) return {
+    store,
+    player: existing,
+    existed: true
+  };
+  const player = {
+    id: newId(),
+    name
+  };
+  return {
+    store: {
+      ...store,
+      players: [...store.players, player]
+    },
+    player,
+    existed: false
+  };
+}
+function renamePlayer(store, id, rawName) {
+  const name = cleanName(rawName);
+  if (!name) return {
+    error: "Enter a name"
+  };
+  if (store.players.some(p => p.id !== id && nameKey(p.name) === nameKey(name))) {
+    return {
+      error: "Someone with that name already exists"
+    };
+  }
+  return {
+    store: {
+      ...store,
+      players: store.players.map(p => p.id === id ? {
+        ...p,
+        name
+      } : p)
+    }
+  };
+}
+function deletePlayer(store, id) {
+  const stats = {
+    ...store.stats.players
+  };
+  delete stats[id];
+  return {
+    ...store,
+    players: store.players.filter(p => p.id !== id),
+    teams: store.teams.map(t => ({
+      ...t,
+      playerIds: t.playerIds.filter(x => x !== id)
+    })),
+    stats: {
+      ...store.stats,
+      players: stats
+    }
+  };
+}
+function commitTeam(store, rawName, playerIds) {
+  const name = cleanName(rawName);
+  const ids = playerIds.filter(id => store.players.some(p => p.id === id));
+  const existing = store.teams.find(t => nameKey(t.name) === nameKey(name));
+  if (existing) {
+    const team = {
+      ...existing,
+      playerIds: ids
+    };
+    return {
+      store: {
+        ...store,
+        teams: store.teams.map(t => t.id === team.id ? team : t)
+      },
+      team
+    };
+  }
+  const team = {
+    id: newId(),
+    name,
+    playerIds: ids
+  };
+  return {
+    store: {
+      ...store,
+      teams: [...store.teams, team]
+    },
+    team
+  };
+}
+function renameTeam(store, id, rawName) {
+  const name = cleanName(rawName);
+  if (!name) return {
+    error: "Enter a name"
+  };
+  if (store.teams.some(t => t.id !== id && nameKey(t.name) === nameKey(name))) {
+    return {
+      error: "A team with that name already exists"
+    };
+  }
+  return {
+    store: {
+      ...store,
+      teams: store.teams.map(t => t.id === id ? {
+        ...t,
+        name
+      } : t)
+    }
+  };
+}
+function deleteTeam(store, id) {
+  const stats = {
+    ...store.stats.teams
+  };
+  delete stats[id];
+  return {
+    ...store,
+    teams: store.teams.filter(t => t.id !== id),
+    stats: {
+      ...store.stats,
+      teams: stats
+    }
+  };
+}
+const isPlaceholderTeam = t => t.playerIds.length === 0 && DEFAULT_TEAM_NAMES.some(n => nameKey(n) === nameKey(t.name));
+function recordGame(store, game, winnerIdx) {
+  if (!game) return store;
+  let teams = store.stats.teams;
+  let players = store.stats.players;
+  game.teamIds.forEach((teamId, i) => {
+    const won = i === winnerIdx ? 1 : 0;
+    teams = bumpStats(teams, teamId, won, 1);
+    game.memberIds[i].forEach(pid => {
+      players = bumpStats(players, pid, won, 1);
+    });
+  });
+  return {
+    ...store,
+    stats: {
+      players,
+      teams
+    }
+  };
+}
+const resetStats = store => ({
+  ...store,
+  stats: {
+    players: {},
+    teams: {}
+  }
+});
+const byName = (a, b) => a.name.localeCompare(b.name);
+const pct = (wins, played) => played ? Math.round(wins / played * 100) : 0;
+function Sheet({
+  title,
+  subtitle,
+  subtitleColor,
+  onClose,
+  children
+}) {
+  return React.createElement("div", {
+    className: "fixed inset-0 z-50 flex items-end",
+    style: {
+      background: "rgba(0,0,0,0.7)"
+    },
+    onClick: onClose
+  }, React.createElement("div", {
+    onClick: e => e.stopPropagation(),
+    className: "w-full max-w-md mx-auto rounded-t-2xl p-6 safe-bottom font-body max-h-[85vh] overflow-y-auto",
+    style: {
+      background: "#211B16",
+      border: "1px solid #4A4038"
+    }
+  }, React.createElement("div", {
+    className: "flex items-start justify-between mb-4"
+  }, React.createElement("div", null, React.createElement("p", {
+    className: "font-display text-2xl chisel uppercase",
+    style: {
+      color: "#F1E9D8"
+    }
+  }, title), subtitle && React.createElement("p", {
+    className: "text-sm",
+    style: {
+      color: subtitleColor || "#9A8C77"
+    }
+  }, subtitle)), React.createElement("button", {
+    onClick: onClose,
+    "aria-label": "Close"
+  }, React.createElement(X, {
+    size: 22,
+    color: "#C9BBA3"
+  }))), children));
+}
+function SheetDoneButton({
+  onClick,
+  label = "DONE"
+}) {
+  return React.createElement("button", {
+    onClick: onClick,
+    className: "w-full rounded-xl py-3 font-display text-xl chisel",
+    style: {
+      background: "#E8A33D",
+      color: "#1B1712"
+    }
+  }, label);
+}
+function RulesSheet({
+  onClose
+}) {
+  return React.createElement(Sheet, {
+    title: "How to play",
+    onClose: onClose
+  }, React.createElement("ul", {
+    className: "text-sm space-y-3",
+    style: {
+      color: "#C9BBA3"
+    }
+  }, React.createElement("li", null, "• One player (the Wordsmith) sees a word and must get their team to guess it in 60 seconds."), React.createElement("li", null, "• Clues can only use ", React.createElement("b", null, "one-syllable words"), ". \"A,\" \"the,\" \"of\" are fine."), React.createElement("li", null, "• No rhyming, no spelling, no sounds-like clues."), React.createElement("li", null, "• The ", React.createElement("b", null, "other team"), " listens closely — the moment a multi-syllable word slips out, they tap ", React.createElement("b", null, "Bonk!"), " The card is lost and the turn ends immediately."), React.createElement("li", null, "• Tap ", React.createElement("b", null, "Skip"), " to pass a hard card to the back of the deck. You get 3 free skips per turn — after that, every skip costs your team 1 point."), React.createElement("li", null, "• Tap ", React.createElement("b", null, "Correct"), " the instant your team guesses right — points add up live."), React.createElement("li", null, "• First team to the target score wins the game."), React.createElement("li", null, "• The leaderboard counts ", React.createElement("b", null, "games won"), ", not correct guesses.")));
+}
+function PlayerPickerSheet({
+  teamName,
+  color,
+  players,
+  selectedIds,
+  takenBy,
+  onToggle,
+  onCreate,
+  onClose
+}) {
+  const [text, setText] = useState("");
+  const [note, setNote] = useState("");
+  const submit = e => {
+    e.preventDefault();
+    const name = cleanName(text);
+    if (!name) return;
+    const r = onCreate(name);
+    setText("");
+    if (r.blocked) setNote(`${r.player.name} is already on ${r.blocked}.`);else if (r.existed) setNote(`${r.player.name} is already on your player list, so that entry was used.`);else setNote(`Added ${r.player.name}.`);
+  };
+  return React.createElement(Sheet, {
+    title: "Add players",
+    subtitle: teamName,
+    subtitleColor: color,
+    onClose: onClose
+  }, React.createElement("form", {
+    onSubmit: submit,
+    className: "flex gap-2 mb-2"
+  }, React.createElement("input", {
+    value: text,
+    onChange: e => setText(e.target.value),
+    maxLength: 20,
+    autoCapitalize: "words",
+    enterKeyHint: "done",
+    placeholder: "New player name",
+    className: "flex-1 min-w-0 rounded-xl px-4 py-3 text-base font-body outline-none",
+    style: {
+      background: "#241E18",
+      border: "2px solid #4A4038",
+      color: "#F1E9D8"
+    }
+  }), React.createElement("button", {
+    type: "submit",
+    className: "rounded-xl px-5 font-medium",
+    style: {
+      background: color,
+      color: "#100D0A"
+    }
+  }, "Add")), React.createElement("p", {
+    className: "text-xs mb-4",
+    style: {
+      color: "#9A8C77",
+      minHeight: "1rem"
+    }
+  }, note), players.length === 0 ? React.createElement("p", {
+    className: "text-sm mb-5",
+    style: {
+      color: "#6B5F50"
+    }
+  }, "No players yet. Type a name above to create the first one. Once created, anyone can be picked here in any future game.") : React.createElement("div", {
+    className: "flex flex-wrap gap-2 mb-5"
+  }, players.slice().sort(byName).map(p => {
+    const selected = selectedIds.includes(p.id);
+    const elsewhere = takenBy[p.id];
+    return React.createElement("button", {
+      key: p.id,
+      disabled: !!elsewhere,
+      onClick: () => onToggle(p.id),
+      className: "rounded-full px-4 py-2 text-base",
+      style: {
+        background: selected ? color : "#2A231C",
+        color: selected ? "#100D0A" : "#F1E9D8",
+        border: `1px solid ${selected ? color : "#4A4038"}`,
+        opacity: elsewhere ? 0.4 : 1
+      }
+    }, p.name, elsewhere ? React.createElement("span", {
+      className: "text-xs"
+    }, " · ", elsewhere) : null);
+  })), React.createElement(SheetDoneButton, {
+    onClick: onClose
+  }));
+}
+function SavedTeamsSheet({
+  teams,
+  playerById,
+  blockedReason,
+  onLoad,
+  onClose
+}) {
+  return React.createElement(Sheet, {
+    title: "Saved teams",
+    subtitle: "Tap one to fill this team in",
+    onClose: onClose
+  }, React.createElement("div", {
+    className: "space-y-2"
+  }, teams.slice().sort(byName).map(t => {
+    const why = blockedReason(t);
+    const members = t.playerIds.map(id => playerById[id] && playerById[id].name).filter(Boolean);
+    return React.createElement("button", {
+      key: t.id,
+      disabled: !!why,
+      onClick: () => onLoad(t),
+      className: "w-full text-left rounded-xl px-4 py-3",
+      style: {
+        background: "#241E18",
+        border: "1px solid #4A4038",
+        opacity: why ? 0.45 : 1
+      }
+    }, React.createElement("p", {
+      className: "text-base",
+      style: {
+        color: "#F1E9D8"
+      }
+    }, t.name), React.createElement("p", {
+      className: "text-xs",
+      style: {
+        color: "#9A8C77"
+      }
+    }, why || (members.length ? members.join(", ") : "No players saved")));
+  })));
+}
+function EditableRow({
+  name,
+  sub,
+  onRename,
+  onDelete
+}) {
+  const [editing, setEditing] = useState(false);
+  const [val, setVal] = useState(name);
+  const [err, setErr] = useState("");
+  const [confirmDel, setConfirmDel] = useState(false);
+  useEffect(() => {
+    if (!confirmDel) return;
+    const t = setTimeout(() => setConfirmDel(false), 3000);
+    return () => clearTimeout(t);
+  }, [confirmDel]);
+  const stop = () => {
+    setEditing(false);
+    setErr("");
+  };
+  const save = () => {
+    const r = onRename(val);
+    if (!r) return stop();
+    setErr(r);
+  };
+  const small = "text-xs rounded-full px-3 py-1";
+  if (editing) {
+    return React.createElement("div", {
+      className: "rounded-lg px-3 py-3",
+      style: {
+        background: "#241E18",
+        border: "1px solid #4A4038"
+      }
+    }, React.createElement("input", {
+      value: val,
+      onChange: e => {
+        setVal(e.target.value);
+        setErr("");
+      },
+      maxLength: 20,
+      autoFocus: true,
+      className: "w-full rounded-lg px-3 py-2 text-base font-body outline-none",
+      style: {
+        background: "#1D1712",
+        border: "1px solid #6B5F50",
+        color: "#F1E9D8"
+      }
+    }), err && React.createElement("p", {
+      className: "text-xs mt-2",
+      style: {
+        color: "#E8917A"
+      }
+    }, err), React.createElement("div", {
+      className: "flex gap-2 mt-3"
+    }, React.createElement("button", {
+      onClick: save,
+      className: small,
+      style: {
+        background: "#E8A33D",
+        color: "#1B1712"
+      }
+    }, "Save"), React.createElement("button", {
+      onClick: stop,
+      className: small,
+      style: {
+        border: "1px solid #4A4038",
+        color: "#C9BBA3"
+      }
+    }, "Cancel")));
+  }
+  return React.createElement("div", {
+    className: "flex items-center justify-between gap-2 rounded-lg px-3 py-2",
+    style: {
+      background: "#241E18"
+    }
+  }, React.createElement("div", {
+    className: "min-w-0"
+  }, React.createElement("p", {
+    className: "truncate",
+    style: {
+      color: "#F1E9D8"
+    }
+  }, name), sub && React.createElement("p", {
+    className: "text-xs truncate",
+    style: {
+      color: "#9A8C77"
+    }
+  }, sub)), React.createElement("div", {
+    className: "flex gap-2 shrink-0"
+  }, React.createElement("button", {
+    onClick: () => {
+      setVal(name);
+      setEditing(true);
+      setConfirmDel(false);
+    },
+    className: small,
+    style: {
+      border: "1px solid #4A4038",
+      color: "#C9BBA3"
+    }
+  }, "Edit"), React.createElement("button", {
+    onClick: () => confirmDel ? onDelete() : setConfirmDel(true),
+    className: small,
+    style: {
+      border: `1px solid ${confirmDel ? "#C1502E" : "#4A4038"}`,
+      background: confirmDel ? "#C1502E" : "transparent",
+      color: confirmDel ? "#2A0F08" : "#C9BBA3"
+    }
+  }, confirmDel ? "Tap to confirm" : "Delete")));
+}
+function ManageSheet({
+  store,
+  setStore,
+  onClose
+}) {
+  const playerById = {};
+  store.players.forEach(p => playerById[p.id] = p);
+  const teamsOf = pid => store.teams.filter(t => t.playerIds.includes(pid)).map(t => t.name);
+  return React.createElement(Sheet, {
+    title: "Players & teams",
+    onClose: onClose
+  }, React.createElement("p", {
+    className: "text-xs uppercase tracking-wide mb-2",
+    style: {
+      color: "#9A8C77"
+    }
+  }, "Players (", store.players.length, ")"), React.createElement("div", {
+    className: "space-y-2 mb-5"
+  }, store.players.slice().sort(byName).map(p => React.createElement(EditableRow, {
+    key: p.id,
+    name: p.name,
+    sub: teamsOf(p.id).join(", "),
+    onRename: v => {
+      const r = renamePlayer(store, p.id, v);
+      if (r.error) return r.error;
+      setStore(r.store);
+      return null;
+    },
+    onDelete: () => setStore(deletePlayer(store, p.id))
+  })), store.players.length === 0 && React.createElement("p", {
+    className: "text-sm",
+    style: {
+      color: "#6B5F50"
+    }
+  }, "No players yet. Add them from a team on the setup screen.")), React.createElement("p", {
+    className: "text-xs uppercase tracking-wide mb-2",
+    style: {
+      color: "#9A8C77"
+    }
+  }, "Saved teams (", store.teams.length, ")"), React.createElement("div", {
+    className: "space-y-2 mb-5"
+  }, store.teams.slice().sort(byName).map(t => React.createElement(EditableRow, {
+    key: t.id,
+    name: t.name,
+    sub: t.playerIds.map(id => playerById[id] && playerById[id].name).filter(Boolean).join(", "),
+    onRename: v => {
+      const r = renameTeam(store, t.id, v);
+      if (r.error) return r.error;
+      setStore(r.store);
+      return null;
+    },
+    onDelete: () => setStore(deleteTeam(store, t.id))
+  })), store.teams.length === 0 && React.createElement("p", {
+    className: "text-sm",
+    style: {
+      color: "#6B5F50"
+    }
+  }, "Teams are saved automatically when you start a game.")), React.createElement("p", {
+    className: "text-xs mb-4",
+    style: {
+      color: "#6B5F50"
+    }
+  }, "Players are created once and picked from the list from then on. Rename fixes a typo; deleting a player or team also removes their win record."), React.createElement(SheetDoneButton, {
+    onClick: onClose
+  }));
+}
+function LeaderRows({
+  rows,
+  color,
+  empty
+}) {
+  if (rows.length === 0) return React.createElement("p", {
+    className: "text-sm",
+    style: {
+      color: "#6B5F50"
+    }
+  }, empty);
+  let rank = 0;
+  return React.createElement("div", {
+    className: "space-y-2"
+  }, rows.map((r, i) => {
+    if (i === 0 || r.wins !== rows[i - 1].wins || r.played !== rows[i - 1].played) rank = i + 1;
+    return React.createElement("div", {
+      key: r.id,
+      className: "flex items-center gap-3 rounded-lg px-3 py-2",
+      style: {
+        background: "#241E18"
+      }
+    }, React.createElement("span", {
+      className: "font-display text-xl w-6 text-center",
+      style: {
+        color: rank === 1 ? color : "#6B5F50"
+      }
+    }, rank), React.createElement("div", {
+      className: "min-w-0 flex-1"
+    }, React.createElement("p", {
+      className: "truncate",
+      style: {
+        color: "#F1E9D8"
+      }
+    }, r.name), React.createElement("p", {
+      className: "text-xs truncate",
+      style: {
+        color: "#9A8C77"
+      }
+    }, r.played, " game", r.played === 1 ? "" : "s", " · ", pct(r.wins, r.played), "% won", r.sub ? ` · ${r.sub}` : "")), React.createElement("div", {
+      className: "text-right shrink-0"
+    }, React.createElement("p", {
+      className: "font-display text-3xl leading-none chisel",
+      style: {
+        color: "#E8A33D"
+      }
+    }, r.wins), React.createElement("p", {
+      className: "text-[10px] uppercase tracking-wide",
+      style: {
+        color: "#9A8C77"
+      }
+    }, "win", r.wins === 1 ? "" : "s")));
+  }));
+}
+function LeaderboardSheet({
+  store,
+  onReset,
+  onClose
+}) {
+  const [confirm, setConfirm] = useState(false);
+  const playerById = {};
+  store.players.forEach(p => playerById[p.id] = p);
+  const rank = (items, statsMap, extra) => items.map(it => {
+    const s = statsMap[it.id] || {
+      wins: 0,
+      played: 0
+    };
+    return {
+      id: it.id,
+      name: it.name,
+      wins: s.wins,
+      played: s.played,
+      sub: extra ? extra(it) : ""
+    };
+  }).filter(r => r.played > 0).sort((a, b) => b.wins - a.wins || pct(b.wins, b.played) - pct(a.wins, a.played) || b.played - a.played || a.name.localeCompare(b.name));
+  const teamRows = rank(store.teams, store.stats.teams, t => t.playerIds.map(id => playerById[id] && playerById[id].name).filter(Boolean).join(", "));
+  const playerRows = rank(store.players, store.stats.players);
+  return React.createElement(Sheet, {
+    title: "Leaderboard",
+    subtitle: "Score = games won",
+    onClose: onClose
+  }, React.createElement("p", {
+    className: "text-xs uppercase tracking-wide mb-2",
+    style: {
+      color: "#9A8C77"
+    }
+  }, "Teams"), React.createElement("div", {
+    className: "mb-5"
+  }, React.createElement(LeaderRows, {
+    rows: teamRows,
+    color: TEAM_COLORS[0],
+    empty: "No finished games yet."
+  })), React.createElement("p", {
+    className: "text-xs uppercase tracking-wide mb-2",
+    style: {
+      color: "#9A8C77"
+    }
+  }, "Players"), React.createElement("div", {
+    className: "mb-5"
+  }, React.createElement(LeaderRows, {
+    rows: playerRows,
+    color: TEAM_COLORS[0],
+    empty: "No players have finished a game yet. Add players to a team on the setup screen."
+  })), React.createElement("button", {
+    onClick: () => {
+      if (confirm) {
+        onReset();
+        setConfirm(false);
+      } else setConfirm(true);
+    },
+    className: "w-full rounded-xl py-3 flex items-center justify-center gap-2 text-sm",
+    style: {
+      background: confirm ? "#C1502E" : "#241E18",
+      color: confirm ? "#2A0F08" : "#C9BBA3",
+      border: "2px solid #4A4038"
+    }
+  }, React.createElement(Trash2, {
+    size: 16
+  }), " ", confirm ? "Tap again: wins reset, players and teams kept" : "Reset win counts"), React.createElement("p", {
+    className: "text-xs text-center mt-3",
+    style: {
+      color: "#6B5F50"
+    }
+  }, "Only finished games count, and only the winning team and its players get a win. Saved on this device."));
+}
 const {
   useState,
   useEffect,
@@ -309,8 +1021,6 @@ const TEAM_COLORS = ["#6E9B7A", "#C1502E", "#4E7FA8"];
 const TEAM_COLORS_DIM = ["#3E5A47", "#6B2D19", "#2C465A"];
 const ROUND_SECONDS = 60;
 const FREE_SKIPS = 3;
-const STORAGE_TEAM_KEY = "cavetalk:stats:teams";
-const STORAGE_PLAYER_KEY = "cavetalk:stats:players";
 function shuffle(arr) {
   const a = [...arr];
   for (let i = a.length - 1; i > 0; i--) {
@@ -319,11 +1029,18 @@ function shuffle(arr) {
   }
   return a;
 }
+const blankSlots = () => DEFAULT_TEAM_NAMES.map(() => ({
+  name: "",
+  playerIds: []
+}));
 function CaveTalk() {
   const [phase, setPhase] = useState("setup");
   const [teamCount, setTeamCount] = useState(2);
-  const [teamNames, setTeamNames] = useState(["Team A", "Team B", "Team C"]);
-  const [teamPlayers, setTeamPlayers] = useState(["", "", ""]);
+  const [store, setStore] = useState(loadStore);
+  const [slots, setSlots] = useState(blankSlots);
+  const [teamNames, setTeamNames] = useState(DEFAULT_TEAM_NAMES);
+  const [setupError, setSetupError] = useState("");
+  const [sheet, setSheet] = useState(null);
   const [targetScore, setTargetScore] = useState(15);
   const [scores, setScores] = useState([0, 0, 0]);
   const [currentTeam, setCurrentTeam] = useState(0);
@@ -334,114 +1051,90 @@ function CaveTalk() {
   const [skipsUsed, setSkipsUsed] = useState(0);
   const [roundEndReason, setRoundEndReason] = useState(null);
   const [shake, setShake] = useState(false);
-  const [showRules, setShowRules] = useState(false);
-  const [showLeaderboard, setShowLeaderboard] = useState(false);
-  const [confirmReset, setConfirmReset] = useState(false);
-  const [teamStats, setTeamStats] = useState({});
-  const [playerStats, setPlayerStats] = useState({});
-  const [statsLoaded, setStatsLoaded] = useState(false);
   const intervalRef = useRef(null);
+  const scoresRef = useRef([0, 0, 0]);
+  const gameRef = useRef(null);
+  const roundLiveRef = useRef(false);
   useEffect(() => {
     try {
-      const t = localStorage.getItem(STORAGE_TEAM_KEY);
-      if (t) setTeamStats(JSON.parse(t));
+      localStorage.setItem(STORE_KEY, JSON.stringify(store));
     } catch (e) {}
-    try {
-      const p = localStorage.getItem(STORAGE_PLAYER_KEY);
-      if (p) setPlayerStats(JSON.parse(p));
-    } catch (e) {}
-    setStatsLoaded(true);
-  }, []);
-  const saveStats = (key, obj) => {
-    try {
-      localStorage.setItem(key, JSON.stringify(obj));
-    } catch (e) {}
+  }, [store]);
+  const playerById = {};
+  store.players.forEach(p => playerById[p.id] = p);
+  const slotName = i => cleanName(slots[i].name) || DEFAULT_TEAM_NAMES[i];
+  const updateSlot = (i, patch) => {
+    setSlots(prev => prev.map((s, j) => j === i ? {
+      ...s,
+      ...patch
+    } : s));
+    setSetupError("");
   };
-  const parsePlayers = str => (str || "").split(",").map(s => s.trim()).filter(Boolean);
-  const recordMatchStart = () => {
-    const activeTeamNames = teamNames.slice(0, teamCount);
-    const allPlayers = teamPlayers.slice(0, teamCount).flatMap(parsePlayers);
-    setTeamStats(prev => {
-      const next = {
-        ...prev
-      };
-      activeTeamNames.forEach(name => {
-        const cur = next[name] || {
-          wins: 0,
-          played: 0
-        };
-        next[name] = {
-          ...cur,
-          played: cur.played + 1
-        };
-      });
-      saveStats(STORAGE_TEAM_KEY, next);
-      return next;
+  const takenByFor = i => {
+    const m = {};
+    for (let j = 0; j < teamCount; j++) {
+      if (j !== i) slots[j].playerIds.forEach(id => m[id] = slotName(j));
+    }
+    return m;
+  };
+  const togglePlayer = (i, id) => {
+    const cur = slots[i].playerIds;
+    updateSlot(i, {
+      playerIds: cur.includes(id) ? cur.filter(x => x !== id) : [...cur, id]
     });
-    if (allPlayers.length) {
-      setPlayerStats(prev => {
-        const next = {
-          ...prev
-        };
-        allPlayers.forEach(name => {
-          const cur = next[name] || {
-            wins: 0,
-            played: 0
-          };
-          next[name] = {
-            ...cur,
-            played: cur.played + 1
-          };
+  };
+  const createPlayer = (i, rawName) => {
+    const r = addPlayer(store, rawName);
+    const blocked = takenByFor(i)[r.player.id];
+    if (!blocked) {
+      if (!r.existed) setStore(r.store);
+      if (!slots[i].playerIds.includes(r.player.id)) {
+        updateSlot(i, {
+          playerIds: [...slots[i].playerIds, r.player.id]
         });
-        saveStats(STORAGE_PLAYER_KEY, next);
-        return next;
+      }
+    }
+    return {
+      player: r.player,
+      existed: r.existed,
+      blocked
+    };
+  };
+  const loadBlockReason = (i, t) => {
+    for (let j = 0; j < teamCount; j++) {
+      if (j !== i && nameKey(slotName(j)) === nameKey(t.name)) return "Already in this game";
+    }
+    const taken = takenByFor(i);
+    const clash = t.playerIds.find(id => taken[id]);
+    if (clash) return `${playerById[clash].name} is on ${taken[clash]}`;
+    return "";
+  };
+  const loadTeam = (i, t) => {
+    updateSlot(i, {
+      name: t.name,
+      playerIds: t.playerIds.filter(id => playerById[id])
+    });
+    setSheet(null);
+  };
+  const autoLoadOnBlur = i => {
+    if (slots[i].playerIds.length) return;
+    const t = store.teams.find(x => nameKey(x.name) === nameKey(slots[i].name));
+    if (t && t.playerIds.length && !loadBlockReason(i, t)) {
+      updateSlot(i, {
+        name: t.name,
+        playerIds: t.playerIds.filter(id => playerById[id])
       });
     }
   };
-  const recordWin = winnerIdx => {
-    const winnerName = teamNames[winnerIdx];
-    setTeamStats(prev => {
-      const next = {
-        ...prev
-      };
-      const cur = next[winnerName] || {
-        wins: 0,
-        played: 0
-      };
-      next[winnerName] = {
-        ...cur,
-        wins: cur.wins + 1
-      };
-      saveStats(STORAGE_TEAM_KEY, next);
-      return next;
+  useEffect(() => {
+    setSlots(prev => {
+      if (prev.every(s => s.playerIds.every(id => playerById[id]))) return prev;
+      return prev.map(s => ({
+        ...s,
+        playerIds: s.playerIds.filter(id => playerById[id])
+      }));
     });
-    const winners = parsePlayers(teamPlayers[winnerIdx]);
-    if (winners.length) {
-      setPlayerStats(prev => {
-        const next = {
-          ...prev
-        };
-        winners.forEach(name => {
-          const cur = next[name] || {
-            wins: 0,
-            played: 0
-          };
-          next[name] = {
-            ...cur,
-            wins: cur.wins + 1
-          };
-        });
-        saveStats(STORAGE_PLAYER_KEY, next);
-        return next;
-      });
-    }
-  };
-  const resetStats = () => {
-    setTeamStats({});
-    setPlayerStats({});
-    saveStats(STORAGE_TEAM_KEY, {});
-    saveStats(STORAGE_PLAYER_KEY, {});
-  };
+  }, [store.players]);
   const drawFrom = useCallback(currentDeck => {
     if (currentDeck.length === 0) {
       const fresh = shuffle(WORDS);
@@ -461,33 +1154,33 @@ function CaveTalk() {
       intervalRef.current = null;
     }
   };
+  const changeScore = (team, delta) => {
+    const next = [...scoresRef.current];
+    next[team] = Math.max(0, next[team] + delta);
+    scoresRef.current = next;
+    setScores(next);
+  };
   const endRound = useCallback(reason => {
+    if (!roundLiveRef.current) return;
+    roundLiveRef.current = false;
     clearTimer();
     setRoundEndReason(reason);
-    setScores(prev => {
-      const next = [...prev];
-      if (next[currentTeam] >= targetScore) {
-        setPhase("gameOver");
-        recordWin(currentTeam);
-      } else {
-        setPhase("roundEnd");
-      }
-      return next;
-    });
-  }, [currentTeam, targetScore, teamNames, teamPlayers, teamCount]);
+    if (scoresRef.current[currentTeam] >= targetScore) {
+      const game = gameRef.current;
+      setStore(s => recordGame(s, game, currentTeam));
+      setPhase("gameOver");
+    } else {
+      setPhase("roundEnd");
+    }
+  }, [currentTeam, targetScore]);
   useEffect(() => {
     if (phase !== "playing") return;
-    intervalRef.current = setInterval(() => {
-      setTimeLeft(t => {
-        if (t <= 1) {
-          endRound("time");
-          return 0;
-        }
-        return t - 1;
-      });
-    }, 1000);
+    intervalRef.current = setInterval(() => setTimeLeft(t => t > 0 ? t - 1 : 0), 1000);
     return clearTimer;
-  }, [phase, endRound]);
+  }, [phase]);
+  useEffect(() => {
+    if (phase === "playing" && timeLeft <= 0) endRound("time");
+  }, [phase, timeLeft, endRound]);
   useEffect(() => {
     if (phase !== "playing" || !("wakeLock" in navigator)) return;
     let lock = null;
@@ -510,14 +1203,47 @@ function CaveTalk() {
     };
   }, [phase]);
   useEffect(() => {
-    document.documentElement.dataset.phase = phase;
-  }, [phase]);
-  const startGame = () => {
-    setScores(Array(teamCount).fill(0));
+    document.documentElement.dataset.phase = sheet ? "sheet" : phase;
+  }, [phase, sheet]);
+  const beginGame = () => {
+    scoresRef.current = [0, 0, 0];
+    setScores([0, 0, 0]);
     setCurrentTeam(0);
     setDeck(shuffle(WORDS));
-    recordMatchStart();
     setPhase("ready");
+  };
+  const startGame = () => {
+    const active = slots.slice(0, teamCount);
+    const names = active.map((_, i) => slotName(i));
+    if (new Set(names.map(nameKey)).size !== names.length) {
+      setSetupError("Each team needs its own name.");
+      return;
+    }
+    const allIds = active.flatMap(s => s.playerIds);
+    if (new Set(allIds).size !== allIds.length) {
+      setSetupError("A player can only be on one team.");
+      return;
+    }
+    let s = store;
+    const teamIds = [];
+    const memberIds = [];
+    const finalNames = [];
+    active.forEach((slot, i) => {
+      const ids = slot.playerIds.filter(id => s.players.some(p => p.id === id));
+      const r = commitTeam(s, names[i], ids);
+      s = r.store;
+      teamIds.push(r.team.id);
+      memberIds.push(ids);
+      finalNames.push(r.team.name);
+    });
+    setStore(s);
+    gameRef.current = {
+      teamIds,
+      memberIds
+    };
+    setTeamNames(finalNames);
+    setSetupError("");
+    beginGame();
   };
   const startRound = () => {
     const {
@@ -529,14 +1255,11 @@ function CaveTalk() {
     setTimeLeft(ROUND_SECONDS);
     setRoundScore(0);
     setSkipsUsed(0);
+    roundLiveRef.current = true;
     setPhase("playing");
   };
   const handleCorrect = () => {
-    setScores(prev => {
-      const next = [...prev];
-      next[currentTeam] += currentCard.pts;
-      return next;
-    });
+    changeScore(currentTeam, currentCard.pts);
     setRoundScore(r => r + currentCard.pts);
     const {
       card,
@@ -548,13 +1271,8 @@ function CaveTalk() {
   const handleSkip = () => {
     const nextSkipCount = skipsUsed + 1;
     setSkipsUsed(nextSkipCount);
-    const penalized = nextSkipCount > FREE_SKIPS;
-    if (penalized) {
-      setScores(prev => {
-        const next = [...prev];
-        next[currentTeam] = Math.max(0, next[currentTeam] - 1);
-        return next;
-      });
+    if (nextSkipCount > FREE_SKIPS) {
+      changeScore(currentTeam, -1);
       setRoundScore(r => r - 1);
     }
     const {
@@ -573,15 +1291,9 @@ function CaveTalk() {
     setCurrentTeam(t => (t + 1) % teamCount);
     setPhase("ready");
   };
-  const playAgain = () => {
-    setScores(Array(teamCount).fill(0));
-    setCurrentTeam(0);
-    setDeck(shuffle(WORDS));
-    recordMatchStart();
-    setPhase("ready");
-  };
-  const winner = scores.slice(0, teamCount).findIndex(s => s >= targetScore);
-  const hasWinner = winner !== -1;
+  const playAgain = () => beginGame();
+  const changeTeams = () => setPhase("setup");
+  const winner = currentTeam;
   return React.createElement("div", {
     className: "app-shell w-full flex flex-col items-center",
     style: {
@@ -629,8 +1341,18 @@ function CaveTalk() {
     }
   }, "CAVE TALK")), React.createElement("div", {
     className: "flex items-center gap-2"
-  }, React.createElement("button", {
-    onClick: () => setShowLeaderboard(true),
+  }, phase === "setup" && React.createElement("button", {
+    onClick: () => setSheet("manage"),
+    className: "rounded-full p-2 border",
+    style: {
+      borderColor: "#4A4038"
+    },
+    "aria-label": "Players and teams"
+  }, React.createElement(Users, {
+    size: 20,
+    color: "#C9BBA3"
+  })), React.createElement("button", {
+    onClick: () => setSheet("leaderboard"),
     className: "rounded-full p-2 border",
     style: {
       borderColor: "#4A4038"
@@ -640,7 +1362,7 @@ function CaveTalk() {
     size: 20,
     color: "#C9BBA3"
   })), React.createElement("button", {
-    onClick: () => setShowRules(true),
+    onClick: () => setSheet("rules"),
     className: "rounded-full p-2 border",
     style: {
       borderColor: "#4A4038"
@@ -675,7 +1397,10 @@ function CaveTalk() {
   }, n, " Teams")))), Array.from({
     length: teamCount
   }, (_, i) => i).map(i => {
-    const defaultName = ["Team A", "Team B", "Team C"][i];
+    const defaultName = DEFAULT_TEAM_NAMES[i];
+    const members = slots[i].playerIds.map(id => playerById[id]).filter(Boolean);
+    const savedTeams = store.teams.filter(t => !isPlaceholderTeam(t));
+    const smallBtn = "rounded-full px-3 py-1 text-sm";
     return React.createElement("div", {
       key: i
     }, React.createElement("label", {
@@ -684,12 +1409,12 @@ function CaveTalk() {
         color: TEAM_COLORS[i]
       }
     }, "Team ", i + 1), React.createElement("input", {
-      value: teamNames[i],
-      onChange: e => {
-        const next = [...teamNames];
-        next[i] = e.target.value || defaultName;
-        setTeamNames(next);
-      },
+      value: slots[i].name,
+      onChange: e => updateSlot(i, {
+        name: e.target.value
+      }),
+      onBlur: () => autoLoadOnBlur(i),
+      maxLength: 20,
       className: "mt-1 w-full rounded-xl px-4 py-3 text-lg font-body outline-none",
       style: {
         background: "#241E18",
@@ -697,21 +1422,41 @@ function CaveTalk() {
         color: "#F1E9D8"
       },
       placeholder: defaultName
-    }), React.createElement("input", {
-      value: teamPlayers[i],
-      onChange: e => {
-        const next = [...teamPlayers];
-        next[i] = e.target.value;
-        setTeamPlayers(next);
-      },
-      className: "mt-2 w-full rounded-xl px-4 py-2 text-base font-body outline-none",
+    }), React.createElement("div", {
+      className: "flex flex-wrap items-center gap-2 mt-2"
+    }, members.map(p => React.createElement("button", {
+      key: p.id,
+      onClick: () => togglePlayer(i, p.id),
+      "aria-label": `Remove ${p.name}`,
+      className: "rounded-full pl-3 pr-2 py-1 text-sm flex items-center gap-1",
       style: {
-        background: "#1D1712",
-        border: "1px solid #3A322A",
+        background: TEAM_COLORS[i],
+        color: "#100D0A"
+      }
+    }, p.name, " ", React.createElement(X, {
+      size: 12,
+      color: "#100D0A"
+    }))), React.createElement("button", {
+      onClick: () => setSheet({
+        type: "players",
+        slot: i
+      }),
+      className: smallBtn,
+      style: {
+        border: `1px dashed ${TEAM_COLORS[i]}`,
+        color: TEAM_COLORS[i]
+      }
+    }, "+ Players"), savedTeams.length > 0 && React.createElement("button", {
+      onClick: () => setSheet({
+        type: "teams",
+        slot: i
+      }),
+      className: smallBtn,
+      style: {
+        border: "1px solid #4A4038",
         color: "#C9BBA3"
-      },
-      placeholder: "Players (optional, comma separated)"
-    }));
+      }
+    }, "Saved teams")));
   }), React.createElement("div", null, React.createElement("label", {
     className: "text-xs uppercase tracking-wide",
     style: {
@@ -728,9 +1473,14 @@ function CaveTalk() {
       color: targetScore === n ? "#1B1712" : "#C9BBA3",
       border: "2px solid #4A4038"
     }
-  }, n)))), React.createElement("button", {
+  }, n)))), setupError && React.createElement("p", {
+    className: "text-sm text-center -mb-2",
+    style: {
+      color: "#E8917A"
+    }
+  }, setupError), React.createElement("button", {
     onClick: startGame,
-    className: "mt-4 rounded-xl py-4 font-display text-2xl flex items-center justify-center gap-2 chisel",
+    className: "mt-2 rounded-xl py-4 font-display text-2xl flex items-center justify-center gap-2 chisel",
     style: {
       background: "#E8A33D",
       color: "#1B1712"
@@ -882,7 +1632,7 @@ function CaveTalk() {
       background: "#E8A33D",
       color: "#1B1712"
     }
-  }, teamNames[(currentTeam + 1) % teamCount], "'S TURN")), phase === "gameOver" && hasWinner && React.createElement("div", {
+  }, teamNames[(currentTeam + 1) % teamCount], "'S TURN")), phase === "gameOver" && React.createElement("div", {
     className: "flex-1 flex flex-col items-center justify-center gap-5 font-body text-center"
   }, React.createElement(Trophy, {
     size: 48,
@@ -913,144 +1663,39 @@ function CaveTalk() {
     }
   }, React.createElement(RotateCcw, {
     size: 20
-  }), " PLAY AGAIN"))), showRules && React.createElement("div", {
-    className: "fixed inset-0 z-50 flex items-end",
+  }), " PLAY AGAIN"), React.createElement("button", {
+    onClick: changeTeams,
+    className: "rounded-xl px-6 py-3 font-body text-sm",
     style: {
-      background: "rgba(0,0,0,0.7)"
-    },
-    onClick: () => setShowRules(false)
-  }, React.createElement("div", {
-    onClick: e => e.stopPropagation(),
-    className: "w-full max-w-md mx-auto rounded-t-2xl p-6 safe-bottom font-body max-h-[80vh] overflow-y-auto",
-    style: {
-      background: "#211B16",
-      border: "1px solid #4A4038"
-    }
-  }, React.createElement("div", {
-    className: "flex items-center justify-between mb-4"
-  }, React.createElement("p", {
-    className: "font-display text-2xl chisel",
-    style: {
-      color: "#F1E9D8"
-    }
-  }, "HOW TO PLAY"), React.createElement("button", {
-    onClick: () => setShowRules(false)
-  }, React.createElement(X, {
-    size: 22,
-    color: "#C9BBA3"
-  }))), React.createElement("ul", {
-    className: "text-sm space-y-3",
-    style: {
+      border: "2px solid #4A4038",
       color: "#C9BBA3"
     }
-  }, React.createElement("li", null, "• One player (the Wordsmith) sees a word and must get their team to guess it in 60 seconds."), React.createElement("li", null, "• Clues can only use ", React.createElement("b", null, "one-syllable words"), ". \"A,\" \"the,\" \"of\" are fine."), React.createElement("li", null, "• No rhyming, no spelling, no sounds-like clues."), React.createElement("li", null, "• The ", React.createElement("b", null, "other team"), " listens closely — the moment a multi-syllable word slips out, they tap ", React.createElement("b", null, "Bonk!"), " The card is lost and the turn ends immediately."), React.createElement("li", null, "• Tap ", React.createElement("b", null, "Skip"), " to pass a hard card to the back of the deck. You get 3 free skips per turn — after that, every skip costs your team 1 point."), React.createElement("li", null, "• Tap ", React.createElement("b", null, "Correct"), " the instant your team guesses right — points add up live."), React.createElement("li", null, "• First team to the target score wins.")))), showLeaderboard && React.createElement("div", {
-    className: "fixed inset-0 z-50 flex items-end",
-    style: {
-      background: "rgba(0,0,0,0.7)"
-    },
-    onClick: () => {
-      setShowLeaderboard(false);
-      setConfirmReset(false);
-    }
-  }, React.createElement("div", {
-    onClick: e => e.stopPropagation(),
-    className: "w-full max-w-md mx-auto rounded-t-2xl p-6 safe-bottom font-body max-h-[80vh] overflow-y-auto",
-    style: {
-      background: "#211B16",
-      border: "1px solid #4A4038"
-    }
-  }, React.createElement("div", {
-    className: "flex items-center justify-between mb-4"
-  }, React.createElement("p", {
-    className: "font-display text-2xl chisel",
-    style: {
-      color: "#F1E9D8"
-    }
-  }, "LEADERBOARD"), React.createElement("button", {
-    onClick: () => {
-      setShowLeaderboard(false);
-      setConfirmReset(false);
-    }
-  }, React.createElement(X, {
-    size: 22,
-    color: "#C9BBA3"
-  }))), React.createElement("p", {
-    className: "text-xs uppercase tracking-wide mb-2",
-    style: {
-      color: "#9A8C77"
-    }
-  }, "Teams"), React.createElement("div", {
-    className: "space-y-2 mb-5"
-  }, Object.entries(teamStats).sort((a, b) => b[1].wins - a[1].wins).map(([name, s]) => React.createElement("div", {
-    key: name,
-    className: "flex items-center justify-between rounded-lg px-3 py-2",
-    style: {
-      background: "#241E18"
-    }
-  }, React.createElement("span", {
-    style: {
-      color: "#F1E9D8"
-    }
-  }, name), React.createElement("span", {
-    className: "text-sm",
-    style: {
-      color: "#E8A33D"
-    }
-  }, s.wins, "W · ", s.played, "P"))), Object.keys(teamStats).length === 0 && React.createElement("p", {
-    className: "text-sm",
-    style: {
-      color: "#6B5F50"
-    }
-  }, "No games recorded yet.")), React.createElement("p", {
-    className: "text-xs uppercase tracking-wide mb-2",
-    style: {
-      color: "#9A8C77"
-    }
-  }, "Players"), React.createElement("div", {
-    className: "space-y-2 mb-5"
-  }, Object.entries(playerStats).sort((a, b) => b[1].wins - a[1].wins).map(([name, s]) => React.createElement("div", {
-    key: name,
-    className: "flex items-center justify-between rounded-lg px-3 py-2",
-    style: {
-      background: "#241E18"
-    }
-  }, React.createElement("span", {
-    style: {
-      color: "#F1E9D8"
-    }
-  }, name), React.createElement("span", {
-    className: "text-sm",
-    style: {
-      color: "#E8A33D"
-    }
-  }, s.wins, "W · ", s.played, "P"))), Object.keys(playerStats).length === 0 && React.createElement("p", {
-    className: "text-sm",
-    style: {
-      color: "#6B5F50"
-    }
-  }, "Add player names at setup (comma separated) to track individuals.")), React.createElement("button", {
-    onClick: () => {
-      if (confirmReset) {
-        resetStats();
-        setConfirmReset(false);
-      } else {
-        setConfirmReset(true);
-      }
-    },
-    className: "w-full rounded-xl py-3 flex items-center justify-center gap-2 text-sm",
-    style: {
-      background: confirmReset ? "#C1502E" : "#241E18",
-      color: confirmReset ? "#2A0F08" : "#C9BBA3",
-      border: "2px solid #4A4038"
-    }
-  }, React.createElement(Trash2, {
-    size: 16
-  }), " ", confirmReset ? "Tap again to confirm reset" : "Reset stats"), React.createElement("p", {
-    className: "text-xs text-center mt-3",
-    style: {
-      color: "#6B5F50"
-    }
-  }, "Stats are saved on this device and persist across games."))));
+  }, "Change teams"))), sheet === "rules" && React.createElement(RulesSheet, {
+    onClose: () => setSheet(null)
+  }), sheet === "leaderboard" && React.createElement(LeaderboardSheet, {
+    store: store,
+    onReset: () => setStore(resetStats(store)),
+    onClose: () => setSheet(null)
+  }), sheet === "manage" && React.createElement(ManageSheet, {
+    store: store,
+    setStore: setStore,
+    onClose: () => setSheet(null)
+  }), sheet && sheet.type === "players" && React.createElement(PlayerPickerSheet, {
+    teamName: slotName(sheet.slot),
+    color: TEAM_COLORS[sheet.slot],
+    players: store.players,
+    selectedIds: slots[sheet.slot].playerIds,
+    takenBy: takenByFor(sheet.slot),
+    onToggle: id => togglePlayer(sheet.slot, id),
+    onCreate: name => createPlayer(sheet.slot, name),
+    onClose: () => setSheet(null)
+  }), sheet && sheet.type === "teams" && React.createElement(SavedTeamsSheet, {
+    teams: store.teams.filter(t => !isPlaceholderTeam(t)),
+    playerById: playerById,
+    blockedReason: t => loadBlockReason(sheet.slot, t),
+    onLoad: t => loadTeam(sheet.slot, t),
+    onClose: () => setSheet(null)
+  }));
 }
 function ScoreBar({
   teamNames,

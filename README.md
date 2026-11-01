@@ -26,8 +26,17 @@ time you're on the setup screen (never mid-game).
 Cards are worth 1-3 points depending on difficulty. The 1,500-card bank covers everyday objects, idioms,
 countries, cities, famous people and school-level concepts.
 
-Wins are tracked per team and per player (add names on the setup screen) in the trophy leaderboard.
-Stats are stored on the device, so an installed home-screen copy keeps its own history.
+## Players, teams and the leaderboard
+
+- **Players are created once.** Tap **+ Players** under a team, type a name the first time, and from then on just tap them
+  in the list. Names are unique ignoring case and spacing ("oak " is just Oak), so one person can't end up with two entries.
+  A player can only be on one team per game.
+- **Teams are saved automatically** when a game starts. Use **Saved teams** to fill a slot with a whole line-up in one tap.
+- The people icon (setup screen only) lists everyone: rename to fix a typo, or delete.
+- The trophy shows **team** and **individual** standings. The score is **games won**, not correct guesses; only finished
+  games count, and every player on the winning team gets the win.
+
+Everything is stored on the device, so an installed home-screen copy keeps its own history.
 
 ## Working on it
 
@@ -35,6 +44,8 @@ The repo root is exactly what GitHub Pages serves. Source lives in `src/`; `npm 
 
 ```
 src/words.js            the word bank (edit this to add/remove cards)
+src/store.js            roster, saved teams and win counts (pure functions + localStorage migration)
+src/sheets.jsx          rules, player picker, saved teams, manage and leaderboard sheets
 src/app.jsx             the game
 src/icons.jsx           inline SVG icons
 src/input.css           Tailwind entry + self-hosted font-faces + app-feel CSS
